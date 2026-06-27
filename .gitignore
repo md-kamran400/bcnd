@@ -1,0 +1,9 @@
+node_modules/
+.env
+!.env.development
+!.env.production
+.windsurf/
+dist/
+build/
+.DS_Store
+*.log
