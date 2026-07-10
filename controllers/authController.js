@@ -878,13 +878,20 @@ exports.deleteUser = async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // Set managedBy to null for any users managed by this user to avoid self-referential constraint violations
+    await User.update({ managedBy: null }, { where: { managedBy: userId } });
+
+    // Set userId to null on any employee record referencing this user to avoid constraint violations
+    const Employee = require("../models/Employee");
+    await Employee.update({ userId: null }, { where: { userId } });
+
     await RefreshToken.destroy({ where: { userId } });
     await user.destroy();
 
     return res.json({ message: "User deleted successfully" });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: "Server error" });
+    return res.status(500).json({ error: "Server error", details: err.message });
   }
 };
 
