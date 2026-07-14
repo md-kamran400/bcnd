@@ -58,6 +58,8 @@ const helmet = require("helmet");
 
 // Auth routes only (others commented out)
 const authRoutes = require("./Routes/auth");
+const salesRoutes = require("./Routes/salesRoutes");
+const annualTargetRoutes = require("./Routes/annualTargetRoutes");
 
 // Comment out other route imports
 // const subscribeRoutes = require("./Routes/System_Notification/Push_notification");
@@ -153,6 +155,8 @@ app.get("/", (req, res) => {
 
 // Mount auth routes only
 app.use("/api/auth", authRoutes);
+app.use("/api/sales", salesRoutes);
+app.use("/api/sales/annual-target", annualTargetRoutes);
 
 // Comment out all other route mounts
 // app.use("/api/subscribe", subscribeRoutes);
