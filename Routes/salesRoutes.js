@@ -13,4 +13,7 @@ router.delete("/monthly-plan/:id", authenticateToken, salesController.deleteMont
 // Sales Analytics endpoint
 router.get("/analytics", authenticateToken, salesController.getSalesAnalytics);
 
+// Annual Data endpoint (retrieves Form 2 data for Form 1 Data Tab)
+router.get("/annual-data", authenticateToken, salesController.getAnnualData);
+
 module.exports = router;
