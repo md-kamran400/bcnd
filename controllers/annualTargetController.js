@@ -1,4 +1,5 @@
 const AnnualTarget = require("../models/AnnualTarget");
+const { Op } = require('sequelize');
 
 /**
  * Form 1: Get Annual Targets by Financial Year
@@ -6,7 +7,7 @@ const AnnualTarget = require("../models/AnnualTarget");
  */
 exports.getAnnualTargets = async (req, res) => {
   try {
-    const { financialYear } = req.query; // e.g. "2026-27"
+    const { financialYear } = req.query;
     if (!financialYear) {
       return res.status(400).json({ success: false, error: "financialYear query parameter is required" });
     }
@@ -42,7 +43,7 @@ exports.getAnnualTargets = async (req, res) => {
 };
 
 /**
- * Form 1: Create or Upsert Annual Target
+ * Form 1: Create or Upsert Annual Target (Optimized)
  * POST /api/sales/annual-target
  */
 exports.saveAnnualTarget = async (req, res) => {
@@ -72,8 +73,10 @@ exports.saveAnnualTarget = async (req, res) => {
       });
     }
 
-    // Link Form 1 to Form 2: sync targets divided equally across 5 salespersons
-    await syncForm1ToForm2(target.financialYear, target.product, target.planSales);
+    // Optimized sync - only sync changed month if provided
+    if (planSales) {
+      await syncForm1ToForm2Optimized(target.financialYear, target.product, planSales);
+    }
 
     return res.json({ success: true, data: target });
   } catch (err) {
@@ -83,7 +86,7 @@ exports.saveAnnualTarget = async (req, res) => {
 };
 
 /**
- * Form 1: Update Annual Target by ID
+ * Form 1: Update Annual Target by ID (Optimized)
  * PUT /api/sales/annual-target/:id
  */
 exports.updateAnnualTarget = async (req, res) => {
@@ -99,8 +102,9 @@ exports.updateAnnualTarget = async (req, res) => {
     target.planSales = planSales || target.planSales;
     await target.save();
 
-    // Link Form 1 to Form 2: sync targets divided equally across 5 salespersons
-    await syncForm1ToForm2(target.financialYear, target.product, target.planSales);
+    if (planSales) {
+      await syncForm1ToForm2Optimized(target.financialYear, target.product, planSales);
+    }
 
     return res.json({ success: true, data: target });
   } catch (err) {
@@ -127,12 +131,12 @@ exports.deleteAnnualTarget = async (req, res) => {
   }
 };
 
-// --- HELPER FUNCTIONS FOR SYNCING FORM 1 TO FORM 2 ---
+// --- OPTIMIZED HELPER FUNCTIONS ---
 
 function getMonthKey(fy, monthAbbr) {
-  const [startYearStr, endYearSuffix] = fy.split("-");
+  const [startYearStr] = fy.split("-");
   const startYear = parseInt(startYearStr);
-  const endYear = startYear + 1; // e.g. "2026-27" -> 2026 and 2027
+  const endYear = startYear + 1;
   
   const monthMap = {
     Apr: `${startYear}-04`,
@@ -151,56 +155,28 @@ function getMonthKey(fy, monthAbbr) {
   return monthMap[monthAbbr];
 }
 
-async function recomputeCascades(product, salesPerson) {
-  const MonthlySalesPlan = require("../models/MonthlySalesPlan");
-  const plans = await MonthlySalesPlan.findAll({
-    where: { product, salesPerson },
-    order: [['month', 'ASC']]
-  });
-  
-  let runningPlanQty = 0;
-  let runningPlanValue = 0;
-  let runningTotalQty = 0;
-  let runningTotalValue = 0;
-  
-  for (const plan of plans) {
-    plan.prevPlanQty = runningPlanQty;
-    plan.prevPlanValue = runningPlanValue;
-    plan.prevTotalQty = runningTotalQty;
-    plan.prevTotalValue = runningTotalValue;
-    
-    await plan.save();
-    
-    runningPlanQty += parseFloat(plan.planQty) || 0;
-    runningPlanValue += parseFloat(plan.planValue) || 0;
-    
-    const monthAchQty = (parseFloat(plan.w1Qty) || 0) + 
-                        (parseFloat(plan.w2Qty) || 0) + 
-                        (parseFloat(plan.w3Qty) || 0) + 
-                        (parseFloat(plan.w4Qty) || 0);
-    const monthAchVal = (parseFloat(plan.w1Value) || 0) + 
-                        (parseFloat(plan.w2Value) || 0) + 
-                        (parseFloat(plan.w3Value) || 0) + 
-                        (parseFloat(plan.w4Value) || 0);
-                        
-    runningTotalQty += monthAchQty;
-    runningTotalValue += monthAchVal;
-  }
-}
-
-async function syncForm1ToForm2(financialYear, product, planSales) {
+// Optimized sync - only sync changed months
+async function syncForm1ToForm2Optimized(financialYear, product, planSales) {
   const MonthlySalesPlan = require("../models/MonthlySalesPlan");
   const SALESPERSONS = ["Mani", "Sukhdev", "Sunil", "Suresh/ mahavir", "LS"];
   const MONTHS = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"];
   
-  for (const monthAbbr of MONTHS) {
+  // Only process months that have data
+  const changedMonths = MONTHS.filter(month => planSales && planSales[month]);
+  
+  if (changedMonths.length === 0) return;
+
+  // Prepare all bulk operations
+  const bulkOps = [];
+  
+  for (const monthAbbr of changedMonths) {
     const monthKey = getMonthKey(financialYear, monthAbbr);
     if (!monthKey) continue;
     
     let targetQty = 0;
     let targetValueCr = 0;
     
-    if (planSales && planSales[monthAbbr]) {
+    if (planSales[monthAbbr]) {
       if (typeof planSales[monthAbbr] === 'object') {
         targetQty = parseFloat(planSales[monthAbbr].qty) || 0;
         targetValueCr = parseFloat(planSales[monthAbbr].value) || 0;
@@ -217,13 +193,16 @@ async function syncForm1ToForm2(financialYear, product, planSales) {
     const planValuePerPerson = targetValueLakhs / 5;
     
     for (const salesPerson of SALESPERSONS) {
-      const [plan, created] = await MonthlySalesPlan.findOrCreate({
-        where: {
+      bulkOps.push({
+        where: { month: monthKey, product, salesPerson },
+        update: {
+          planQty: planQtyPerPerson,
+          planValue: planValuePerPerson
+        },
+        create: {
           month: monthKey,
           product,
-          salesPerson
-        },
-        defaults: {
+          salesPerson,
           planQty: planQtyPerPerson,
           planValue: planValuePerPerson,
           w1Qty: 0, w1Value: 0,
@@ -235,17 +214,93 @@ async function syncForm1ToForm2(financialYear, product, planSales) {
           auditLogs: []
         }
       });
-      
-      if (!created) {
-        plan.planQty = planQtyPerPerson;
-        plan.planValue = planValuePerPerson;
-        await plan.save();
-      }
     }
   }
 
-  // Cascading update for all 5 salespeople
+  // Execute bulk upsert
+  if (bulkOps.length > 0) {
+    await MonthlySalesPlan.bulkCreate(
+      bulkOps.map(op => op.create),
+      { updateOnDuplicate: ['planQty', 'planValue', 'updated_at'] }
+    );
+  }
+
+  // Async recompute without waiting (fire and forget)
+  // This prevents blocking the response
+  setImmediate(async () => {
+    try {
+      await recomputeCascadesOptimized(product);
+    } catch (err) {
+      console.error('Error in background recompute:', err);
+    }
+  });
+}
+
+// Optimized cascade recomputation
+async function recomputeCascadesOptimized(product) {
+  const MonthlySalesPlan = require("../models/MonthlySalesPlan");
+  const SALESPERSONS = ["Mani", "Sukhdev", "Sunil", "Suresh/ mahavir", "LS"];
+  
+  const allPlans = await MonthlySalesPlan.findAll({
+    where: { product },
+    order: [['salesPerson', 'ASC'], ['month', 'ASC']]
+  });
+
+  // Group by salesPerson
+  const groupedPlans = {};
+  for (const plan of allPlans) {
+    if (!groupedPlans[plan.salesPerson]) {
+      groupedPlans[plan.salesPerson] = [];
+    }
+    groupedPlans[plan.salesPerson].push(plan);
+  }
+
+  // Process each salesperson
+  const updatePromises = [];
   for (const salesPerson of SALESPERSONS) {
-    await recomputeCascades(product, salesPerson);
+    const plans = groupedPlans[salesPerson] || [];
+    let runningPlanQty = 0;
+    let runningPlanValue = 0;
+    let runningTotalQty = 0;
+    let runningTotalValue = 0;
+    
+    for (const plan of plans) {
+      // Only update if values changed
+      const newPrevPlanQty = runningPlanQty;
+      const newPrevPlanValue = runningPlanValue;
+      const newPrevTotalQty = runningTotalQty;
+      const newPrevTotalValue = runningTotalValue;
+      
+      if (plan.prevPlanQty !== newPrevPlanQty || 
+          plan.prevPlanValue !== newPrevPlanValue ||
+          plan.prevTotalQty !== newPrevTotalQty ||
+          plan.prevTotalValue !== newPrevTotalValue) {
+        
+        plan.prevPlanQty = newPrevPlanQty;
+        plan.prevPlanValue = newPrevPlanValue;
+        plan.prevTotalQty = newPrevTotalQty;
+        plan.prevTotalValue = newPrevTotalValue;
+        updatePromises.push(plan.save());
+      }
+      
+      runningPlanQty += parseFloat(plan.planQty) || 0;
+      runningPlanValue += parseFloat(plan.planValue) || 0;
+      
+      const monthAchQty = (parseFloat(plan.w1Qty) || 0) + 
+                          (parseFloat(plan.w2Qty) || 0) + 
+                          (parseFloat(plan.w3Qty) || 0) + 
+                          (parseFloat(plan.w4Qty) || 0);
+      const monthAchVal = (parseFloat(plan.w1Value) || 0) + 
+                          (parseFloat(plan.w2Value) || 0) + 
+                          (parseFloat(plan.w3Value) || 0) + 
+                          (parseFloat(plan.w4Value) || 0);
+                          
+      runningTotalQty += monthAchQty;
+      runningTotalValue += monthAchVal;
+    }
+  }
+
+  if (updatePromises.length > 0) {
+    await Promise.all(updatePromises);
   }
 }
